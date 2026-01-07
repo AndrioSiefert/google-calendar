@@ -6,8 +6,9 @@ import {
     insertGoogleReminderLink,
     updateGoogleReminderLocal,
 } from '../db/googleReminders';
-import { buildCalendarClientFromAccount, createEvent, deleteEvent, patchEvent } from '../google/calendar';
+import { buildCalendarClientFromAccount, createEvent, deleteEvent, isGoogleRateLimitError, patchEvent } from '../google/calendar';
 import { addMinutesIso, normalizeToRfc3339 } from '../utils/time';
+import { enqueueThrottledRedis } from '../utils/throttleQueueRedis';
 
 export const googleRemindersRouter = Router();
 
@@ -33,44 +34,78 @@ googleRemindersRouter.post('/google-reminders/create', async (req, res) => {
             return res.json({ ok: false, error: 'no_calendar_account' });
         }
 
-        const calendarClient = buildCalendarClientFromAccount(account);
-        if (!calendarClient) {
-            return res.json({ ok: false, error: 'invalid_tokens' });
-        }
+        const queueKey = `calendar:${account.id}`;
 
-        const { calendar, calendarId } = calendarClient;
+        const result = await enqueueThrottledRedis(queueKey, 1000, async () => {
+            const existing = await findGoogleReminderByReminderId({ phone, reminderId: reminder_id });
+            if (existing?.google_event_id) {
+                return {
+                    ok: true,
+                    already_exists: true,
+                    google_reminder_id: existing.id,
+                    google_event_id: existing.google_event_id,
+                    calendar_id: existing.calendar_id || account.calendarId,
+                };
+            }
 
-        const created = await createEvent({
-            calendar,
-            calendarId,
-            summary: content,
-            description: 'Lembrete criado pela BIA 🐝',
-            startDateTime,
-            endDateTime: addMinutesIso(startDateTime, 30),
-            timeZone: tzFinal,
+            const calendarClient = buildCalendarClientFromAccount(account);
+            if (!calendarClient) {
+                return { ok: false, error: 'invalid_tokens' };
+            }
+
+            const { calendar, calendarId } = calendarClient;
+
+            const created = await createEvent({
+                calendar,
+                calendarId,
+                summary: content,
+                description: 'Lembrete criado pela BIA 🐝',
+                startDateTime,
+                endDateTime: addMinutesIso(startDateTime, 30),
+                timeZone: tzFinal,
+            });
+
+            if (!created.id) {
+                return { ok: false, error: 'no_event_id' };
+            }
+
+            try {
+                const insertResult = await insertGoogleReminderLink({
+                    phone,
+                    calendarAccountId: account.id,
+                    reminderId: reminder_id,
+                    content,
+                    dueAt: due_at,
+                    tz: tzFinal,
+                    googleEventId: created.id,
+                });
+
+                return {
+                    ok: true,
+                    google_reminder_id: insertResult.id,
+                    google_event_id: created.id,
+                    calendar_id: calendarId,
+                };
+            } catch (dbErr) {
+                const again = await findGoogleReminderByReminderId({ phone, reminderId: reminder_id });
+                if (again?.google_event_id) {
+                    return {
+                        ok: true,
+                        already_exists: true,
+                        google_reminder_id: again.id,
+                        google_event_id: again.google_event_id,
+                        calendar_id: again.calendar_id || calendarId,
+                    };
+                }
+                throw dbErr;
+            }
         });
 
-        if (!created.id) {
-            return res.status(500).json({ ok: false, error: 'no_event_id' });
-        }
-
-        const insertResult = await insertGoogleReminderLink({
-            phone,
-            calendarAccountId: account.id,
-            reminderId: reminder_id,
-            content,
-            dueAt: due_at,
-            tz: tzFinal,
-            googleEventId: created.id,
-        });
-
-        return res.json({
-            ok: true,
-            google_reminder_id: insertResult.id,
-            google_event_id: created.id,
-            calendar_id: calendarId,
-        });
+        return res.json(result);
     } catch (err) {
+        if (isGoogleRateLimitError(err)) {
+            return res.status(429).json({ ok: false, error: 'rate_limited' });
+        }
         console.error('Erro em /google-reminders/create', err);
         return res.status(500).json({ ok: false, error: 'internal_error' });
     }
@@ -80,7 +115,7 @@ googleRemindersRouter.post('/google-reminders/update', async (req, res) => {
     try {
         const { phone, id, reminder_id, content, due_at, tz } = req.body as {
             phone?: string;
-            id?: string; // compat com n8n antigo
+            id?: string; 
             reminder_id?: string;
             content?: string;
             due_at?: string;
@@ -110,20 +145,23 @@ googleRemindersRouter.post('/google-reminders/update', async (req, res) => {
         const calendarId = row.calendar_id || 'primary';
         const googleEventId = row.google_event_id;
 
-        let updatedOnGoogle = false;
+        const queueKey = `calendar:${row.calendar_account_id}`;
 
-        if (googleEventId && row.refresh_token) {
-            const calendarClient = buildCalendarClientFromAccount({
-                calendarId,
-                accessToken: row.access_token,
-                refreshToken: row.refresh_token,
-                tokenExpiresAt: row.token_expires_at ?? null,
-            });
+        const result = await enqueueThrottledRedis(queueKey, 800, async () => {
+            let updatedOnGoogle = false;
 
-            if (calendarClient) {
-                const { calendar } = calendarClient;
-                const startDateTime = normalizeToRfc3339(String(dueAtFinal));
-                try {
+            if (googleEventId && row.refresh_token) {
+                const calendarClient = buildCalendarClientFromAccount({
+                    calendarId,
+                    accessToken: row.access_token,
+                    refreshToken: row.refresh_token,
+                    tokenExpiresAt: row.token_expires_at ?? null,
+                });
+
+                if (calendarClient) {
+                    const { calendar } = calendarClient;
+                    const startDateTime = normalizeToRfc3339(String(dueAtFinal));
+
                     await patchEvent({
                         calendar,
                         calendarId,
@@ -133,30 +171,33 @@ googleRemindersRouter.post('/google-reminders/update', async (req, res) => {
                         endDateTime: addMinutesIso(startDateTime, 30),
                         timeZone: tzFinal,
                     });
+
                     updatedOnGoogle = true;
-                } catch (googleErr) {
-                    console.error('Erro atualizando evento no Google Calendar:', googleErr);
-                    return res.status(500).json({ ok: false, error: 'google_update_error' });
                 }
             }
-        }
 
-        await updateGoogleReminderLocal({
-            id: row.id,
-            phone,
-            content: contentFinal,
-            dueAt: dueAtFinal,
-            tz: tzFinal,
+            await updateGoogleReminderLocal({
+                id: row.id,
+                phone,
+                content: contentFinal,
+                dueAt: dueAtFinal,
+                tz: tzFinal,
+            });
+
+            return {
+                ok: true,
+                updatedLocally: true,
+                updatedOnGoogle,
+                google_event_id: googleEventId,
+                calendar_id: calendarId,
+            };
         });
 
-        return res.json({
-            ok: true,
-            updatedLocally: true,
-            updatedOnGoogle,
-            google_event_id: googleEventId,
-            calendar_id: calendarId,
-        });
+        return res.json(result);
     } catch (err) {
+        if (isGoogleRateLimitError(err)) {
+            return res.status(429).json({ ok: false, error: 'rate_limited' });
+        }
         console.error('Erro em /google-reminders/update', err);
         return res.status(500).json({ ok: false, error: 'internal_error' });
     }
@@ -166,7 +207,7 @@ googleRemindersRouter.post('/google-reminders/delete', async (req, res) => {
     try {
         const { phone, id, reminder_id } = req.body as {
             phone?: string;
-            id?: string; // compat com n8n antigo
+            id?: string;
             reminder_id?: string;
         };
 
@@ -185,32 +226,36 @@ googleRemindersRouter.post('/google-reminders/delete', async (req, res) => {
         const googleEventId = row.google_event_id;
         const calendarId = row.calendar_id || 'primary';
 
-        let deletedOnGoogle = false;
+        const queueKey = `calendar:${row.calendar_account_id}`;
 
-        if (googleEventId && row.refresh_token) {
-            const calendarClient = buildCalendarClientFromAccount({
-                calendarId,
-                accessToken: row.access_token,
-                refreshToken: row.refresh_token,
-                tokenExpiresAt: row.token_expires_at ?? null,
-            });
+        const result = await enqueueThrottledRedis(queueKey, 800, async () => {
+            let deletedOnGoogle = false;
 
-            if (calendarClient) {
-                const { calendar } = calendarClient;
-                try {
+            if (googleEventId && row.refresh_token) {
+                const calendarClient = buildCalendarClientFromAccount({
+                    calendarId,
+                    accessToken: row.access_token,
+                    refreshToken: row.refresh_token,
+                    tokenExpiresAt: row.token_expires_at ?? null,
+                });
+
+                if (calendarClient) {
+                    const { calendar } = calendarClient;
                     await deleteEvent({ calendar, calendarId, eventId: googleEventId });
                     deletedOnGoogle = true;
-                } catch (googleErr) {
-                    console.error('Erro deletando evento no Google Calendar:', googleErr);
-                    return res.status(500).json({ ok: false, error: 'google_delete_error' });
                 }
             }
-        }
 
-        await deleteGoogleReminderLocal({ id: row.id, phone });
+            await deleteGoogleReminderLocal({ id: row.id, phone });
 
-        return res.json({ ok: true, deletedLocally: true, deletedOnGoogle });
+            return { ok: true, deletedLocally: true, deletedOnGoogle };
+        });
+
+        return res.json(result);
     } catch (err) {
+        if (isGoogleRateLimitError(err)) {
+            return res.status(429).json({ ok: false, error: 'rate_limited' });
+        }
         console.error('Erro em /google-reminders/delete', err);
         return res.status(500).json({ ok: false, error: 'internal_error' });
     }
