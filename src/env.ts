@@ -17,7 +17,6 @@ export const BIA_WHATSAPP_NUMBER = (process.env.BIA_WHATSAPP_NUMBER || '').repla
 
 export const STATE_SIGNING_SECRET = process.env.STATE_SIGNING_SECRET || GOOGLE_CLIENT_SECRET || '';
 
-// NOVO (Redis)
 export const REDIS_URL = process.env.REDIS_URL || '';
 
 export function assertRequiredEnv() {

@@ -1,6 +1,76 @@
 import { google } from 'googleapis';
 import { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI } from '../env';
 
+function sleep(ms: number) {
+    return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function extractGoogleErrorReason(err: any): string | null {
+    const directReason = err?.errors?.[0]?.reason;
+    if (typeof directReason === 'string' && directReason) return directReason;
+
+    const nestedReason = err?.response?.data?.error?.errors?.[0]?.reason;
+    if (typeof nestedReason === 'string' && nestedReason) return nestedReason;
+
+    const message = err?.message;
+    if (typeof message === 'string' && message.toLowerCase().includes('rate limit')) {
+        return 'rateLimitExceeded';
+    }
+
+    return null;
+}
+
+export function isGoogleRateLimitError(err: any): boolean {
+    const status = Number(err?.code || err?.response?.status || 0);
+    const reason = extractGoogleErrorReason(err);
+
+    return (
+        status === 429 ||
+        reason === 'rateLimitExceeded' ||
+        reason === 'userRateLimitExceeded' ||
+        reason === 'quotaExceeded'
+    );
+}
+
+function isRetryableGoogleError(err: any): boolean {
+    const status = Number(err?.code || err?.response?.status || 0);
+    if (status >= 500) return true;
+    if (status === 429) return true;
+
+    if (isGoogleRateLimitError(err)) return true;
+
+    return false;
+}
+
+async function googleRequestWithRetry<T>(
+    fn: () => Promise<T>,
+    opts?: { maxAttempts?: number; baseDelayMs?: number },
+): Promise<T> {
+    const maxAttempts = Math.max(1, opts?.maxAttempts ?? 6);
+    const baseDelayMs = Math.max(100, opts?.baseDelayMs ?? 800);
+
+    let lastErr: any;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            return await fn();
+        } catch (err) {
+            lastErr = err;
+
+            if (!isRetryableGoogleError(err) || attempt === maxAttempts) {
+                throw err;
+            }
+            const exp = Math.pow(2, attempt - 1);
+            const rawDelay = Math.min(30_000, baseDelayMs * exp);
+            const jitter = 0.7 + Math.random() * 0.6; // 0.7x..1.3x
+            const delay = Math.round(rawDelay * jitter);
+
+            await sleep(delay);
+        }
+    }
+
+    throw lastErr;
+}
+
 export function buildCalendarClientFromAccount(account: {
     calendarId: string;
     accessToken: string | null;
@@ -13,9 +83,7 @@ export function buildCalendarClientFromAccount(account: {
 
     const oauthClient = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI);
 
-    const expiryDate = account.tokenExpiresAt
-        ? new Date(account.tokenExpiresAt).getTime()
-        : undefined;
+    const expiryDate = account.tokenExpiresAt ? new Date(account.tokenExpiresAt).getTime() : undefined;
 
     oauthClient.setCredentials({
         refresh_token: account.refreshToken,
@@ -37,15 +105,17 @@ export async function createEvent(params: {
     endDateTime: string;
     timeZone: string;
 }) {
-    const created = await params.calendar.events.insert({
-        calendarId: params.calendarId,
-        requestBody: {
-            summary: params.summary,
-            description: params.description,
-            start: { dateTime: params.startDateTime, timeZone: params.timeZone },
-            end: { dateTime: params.endDateTime, timeZone: params.timeZone },
-        },
-    });
+    const created = await googleRequestWithRetry(() =>
+        params.calendar.events.insert({
+            calendarId: params.calendarId,
+            requestBody: {
+                summary: params.summary,
+                description: params.description,
+                start: { dateTime: params.startDateTime, timeZone: params.timeZone },
+                end: { dateTime: params.endDateTime, timeZone: params.timeZone },
+            },
+        }),
+    );
 
     return { id: created.data.id ?? null };
 }
@@ -59,15 +129,17 @@ export async function patchEvent(params: {
     endDateTime?: string;
     timeZone?: string;
 }) {
-    await params.calendar.events.patch({
-        calendarId: params.calendarId,
-        eventId: params.eventId,
-        requestBody: {
-            summary: params.summary,
-            start: params.startDateTime ? { dateTime: params.startDateTime, timeZone: params.timeZone } : undefined,
-            end: params.endDateTime ? { dateTime: params.endDateTime, timeZone: params.timeZone } : undefined,
-        },
-    });
+    await googleRequestWithRetry(() =>
+        params.calendar.events.patch({
+            calendarId: params.calendarId,
+            eventId: params.eventId,
+            requestBody: {
+                summary: params.summary,
+                start: params.startDateTime ? { dateTime: params.startDateTime, timeZone: params.timeZone } : undefined,
+                end: params.endDateTime ? { dateTime: params.endDateTime, timeZone: params.timeZone } : undefined,
+            },
+        }),
+    );
 }
 
 export async function deleteEvent(params: {
@@ -75,8 +147,10 @@ export async function deleteEvent(params: {
     calendarId: string;
     eventId: string;
 }) {
-    await params.calendar.events.delete({
-        calendarId: params.calendarId,
-        eventId: params.eventId,
-    });
+    await googleRequestWithRetry(() =>
+        params.calendar.events.delete({
+            calendarId: params.calendarId,
+            eventId: params.eventId,
+        }),
+    );
 }
