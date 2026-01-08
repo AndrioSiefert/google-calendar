@@ -60,47 +60,68 @@ calendarLinkRouter.post('/calendar/link/start', async (req, res) => {
 });
 
 calendarLinkRouter.get('/calendar/link/:code', async (req, res) => {
-    try {
-        const { code } = req.params as { code: string };
-        const redis = getRedis();
+    const { code } = req.params;
+  
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+  
+    const goUrl = `/calendar/link/${encodeURIComponent(code)}/go`;
+  
+    return res.send(`<!doctype html>
+  <html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Conectando...</title>
+  </head>
+  <body style="font-family:system-ui;margin:24px">
+    <p>Redirecionando para o Google...</p>
+    <p>Se não redirecionar automaticamente, clique aqui:</p>
+    <p><a href="${goUrl}">Continuar</a></p>
+    <script>
+      window.location.replace(${JSON.stringify(goUrl)});
+    </script>
+  </body>
+  </html>`);
+  });
+  
 
-        if (!redis) {
-            res.status(500).setHeader('Content-Type', 'text/html; charset=utf-8');
-            return res.send(renderErrorPage('Serviço indisponível', 'Redis não está configurado para gerar links curtos.'));
-        }
-
-        const key = `calendar:link:${code}`;
-        const phone = await redis.get(key);
-
-        if (!phone) {
-            res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
-            return res.send(
-                renderErrorPage('Link expirou', 'Esse link de conexão expirou. Volte no WhatsApp e peça para eu gerar um novo.'),
-            );
-        }
-        await redis.del(key);
-
-        const state = createState(phone);
-        const REQUIRED_CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
-
-        const authorizationUrl = loginOauthClient.generateAuthUrl({
-            access_type: 'offline',
-            prompt: 'consent',
-            include_granted_scopes: true,
-            scope: [
-                REQUIRED_CALENDAR_SCOPE,
-                'https://www.googleapis.com/auth/userinfo.email',
-                'https://www.googleapis.com/auth/userinfo.profile',
-                'openid',
-            ],
-            state,
-        });
-
-        return res.redirect(302, authorizationUrl);
-    } catch (err) {
-        console.error('Erro em /calendar/link/:code', err);
-        res.status(500).setHeader('Content-Type', 'text/html; charset=utf-8');
-        return res.send(renderErrorPage('Erro interno', 'Não foi possível iniciar a conexão com o Google.'));
+  calendarLinkRouter.get('/calendar/link/:code/go', async (req, res) => {
+    const { code } = req.params;
+  
+    const redis = getRedis();
+    if (!redis) {
+      res.status(500).setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.send(renderErrorPage('Serviço indisponível', 'Redis não configurado.'));
     }
-});
+  
+    const key = `calendar:link:${code}`;
+    const phone = await redis.get(key);
+  
+    if (!phone) {
+      res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.send(renderErrorPage('Link expirou', 'Esse link de conexão expirou. Volte no WhatsApp e peça para eu gerar um novo.'));
+    }
 
+    await redis.del(key);
+  
+    const state = createState(phone);
+    const REQUIRED_CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
+  
+    const authorizationUrl = loginOauthClient.generateAuthUrl({
+      access_type: 'offline',
+      prompt: 'consent',
+      include_granted_scopes: true,
+      scope: [
+        REQUIRED_CALENDAR_SCOPE,
+        'https://www.googleapis.com/auth/userinfo.email',
+        'https://www.googleapis.com/auth/userinfo.profile',
+        'openid',
+      ],
+      state,
+    });
+  
+    return res.redirect(302, authorizationUrl);
+  });
+  
