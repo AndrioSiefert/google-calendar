@@ -5,7 +5,7 @@ import { createState, decodeState } from '../state';
 import { findActiveCalendarAccountForPhone, upsertCalendarAccount } from '../db/calendarAccounts';
 import { notifyN8nCalendarConnected } from '../webhooks/n8n';
 import { buildWhatsAppReturnLink, formatPhoneBR } from '../utils/phone';
-import { renderErrorPage, renderSuccessPage } from '../templates';  
+import { renderErrorPage, renderSuccessPage } from '../templates';
 import { getRedis } from '../redis/client';
 import { PUBLIC_BASE_URL } from '../env';
 
@@ -21,8 +21,8 @@ calendarLinkRouter.post('/calendar/link/start', async (req, res) => {
 
         const normalizedPhone = String(phone).replace(/\D/g, '');
         const redis = getRedis();
-
-        if(redis){
+        
+        if (redis) {
             const linkCode = crypto.randomBytes(8).toString('base64url');
             const ttlSeconds = 15 * 60;
 
@@ -36,7 +36,7 @@ calendarLinkRouter.post('/calendar/link/start', async (req, res) => {
             });
         }
 
-        const state = createState(phone);
+        const state = createState(normalizedPhone);
         const REQUIRED_CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
 
         const authorizationUrl = loginOauthClient.generateAuthUrl({
@@ -59,69 +59,164 @@ calendarLinkRouter.post('/calendar/link/start', async (req, res) => {
     }
 });
 
+
 calendarLinkRouter.get('/calendar/link/:code', async (req, res) => {
-    const { code } = req.params;
-  
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-  
-    const goUrl = `/calendar/link/${encodeURIComponent(code)}/go`;
-  
-    return res.send(`<!doctype html>
-  <html lang="pt-BR">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Conectando...</title>
-  </head>
-  <body style="font-family:system-ui;margin:24px">
-    <p>Redirecionando para o Google...</p>
-    <p>Se não redirecionar automaticamente, clique aqui:</p>
-    <p><a href="${goUrl}">Continuar</a></p>
-    <script>
-      window.location.replace(${JSON.stringify(goUrl)});
-    </script>
-  </body>
-  </html>`);
-  });
-  
+    try {
+        const { code } = req.params as { code: string };
+        const redis = getRedis();
 
-  calendarLinkRouter.get('/calendar/link/:code/go', async (req, res) => {
-    const { code } = req.params;
-  
-    const redis = getRedis();
-    if (!redis) {
-      res.status(500).setHeader('Content-Type', 'text/html; charset=utf-8');
-      return res.send(renderErrorPage('Serviço indisponível', 'Redis não configurado.'));
-    }
-  
-    const key = `calendar:link:${code}`;
-    const phone = await redis.get(key);
-  
-    if (!phone) {
-      res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
-      return res.send(renderErrorPage('Link expirou', 'Esse link de conexão expirou. Volte no WhatsApp e peça para eu gerar um novo.'));
-    }
+        if (!redis) {
+            res.status(500).setHeader('Content-Type', 'text/html; charset=utf-8');
+            return res.send(renderErrorPage('Serviço indisponível', 'Redis não está configurado para gerar links curtos.'));
+        }
 
-    await redis.del(key);
-  
-    const state = createState(phone);
-    const REQUIRED_CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
-  
-    const authorizationUrl = loginOauthClient.generateAuthUrl({
-      access_type: 'offline',
-      prompt: 'consent',
-      include_granted_scopes: true,
-      scope: [
-        REQUIRED_CALENDAR_SCOPE,
-        'https://www.googleapis.com/auth/userinfo.email',
-        'https://www.googleapis.com/auth/userinfo.profile',
-        'openid',
-      ],
-      state,
-    });
-  
-    return res.redirect(302, authorizationUrl);
-  });
-  
+        const key = `calendar:link:${code}`;
+        const phone = await redis.get(key);
+
+        if (!phone) {
+            res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
+            return res.send(
+                renderErrorPage('Link expirou', 'Esse link de conexão expirou. Volte no WhatsApp e peça para eu gerar um novo.'),
+            );
+        }
+
+        const state = createState(phone);
+        const REQUIRED_CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
+
+        const authorizationUrl = loginOauthClient.generateAuthUrl({
+            access_type: 'offline',
+            prompt: 'consent',
+            include_granted_scopes: true,
+            scope: [
+                REQUIRED_CALENDAR_SCOPE,
+                'https://www.googleapis.com/auth/userinfo.email',
+                'https://www.googleapis.com/auth/userinfo.profile',
+                'openid',
+            ],
+            state,
+        });
+
+        return res.redirect(302, authorizationUrl);
+    } catch (err) {
+        console.error('Erro em /calendar/link/:code', err);
+        res.status(500).setHeader('Content-Type', 'text/html; charset=utf-8');
+        return res.send(renderErrorPage('Erro interno', 'Não foi possível iniciar a conexão com o Google.'));
+    }
+});
+
+calendarLinkRouter.get('/calendar/callback', async (req, res) => {
+    try {
+        const code = req.query.code as string | undefined;
+        const state = req.query.state as string | undefined;
+
+        if (!code || !state) {
+            res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
+            return res.send(renderErrorPage('Requisição inválida', 'Faltando parâmetros (code/state).'));
+        }
+
+        const { phone } = decodeState(state);
+
+        const oauthClient = createOauthClient();
+        const { tokens } = await oauthClient.getToken(code);
+        oauthClient.setCredentials(tokens);
+
+        const accessToken = tokens.access_token ?? null;
+        const refreshTokenFromGoogle = tokens.refresh_token ?? null;
+
+        if (!accessToken) {
+            console.error('Nenhum access_token retornado pelo Google:', tokens);
+            res.status(500).setHeader('Content-Type', 'text/html; charset=utf-8');
+            return res.send(renderErrorPage('Falha ao conectar', 'Não foi possível obter access_token do Google.'));
+        }
+
+        const REQUIRED_CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
+        try {
+            const info: any = await oauthClient.getTokenInfo(accessToken);
+            const rawScopes: string =
+                (Array.isArray(info?.scopes) ? info.scopes.join(' ') : info?.scope) || '';
+            const granted = new Set(
+                rawScopes
+                    .split(' ')
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+            );
+
+            if (!granted.has(REQUIRED_CALENDAR_SCOPE)) {
+                console.error('Token sem escopo do Calendar:', { granted: Array.from(granted), info });
+                res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
+                return res.send(
+                    renderErrorPage(
+                        'Permissão insuficiente',
+                        'O Google não retornou a permissão necessária para criar eventos no Calendar. Remova o acesso do app na sua Conta Google e tente conectar novamente.',
+                    ),
+                );
+            }
+        } catch (e) {
+            console.error('Falha ao validar escopos do token:', e);
+
+            res.status(500).setHeader('Content-Type', 'text/html; charset=utf-8');
+            return res.send(renderErrorPage('Falha ao conectar', 'Não foi possível validar as permissões do Google.'));
+        }
+
+        const existing = await findActiveCalendarAccountForPhone(phone);
+        const refreshToken = refreshTokenFromGoogle || existing?.refreshToken || null;
+
+        if (!refreshToken) {
+            console.error('Nenhum refresh_token retornado pelo Google e não há token salvo:', tokens);
+            res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
+            return res.send(
+                renderErrorPage(
+                    'Conexão incompleta',
+                    'O Google não retornou o refresh_token (acesso permanente). Remova o acesso do app na sua Conta Google e conecte novamente.',
+                ),
+            );
+        }
+
+        const userInfo = await fetchGoogleUserInfo(oauthClient);
+        const email = userInfo.email ?? null;
+        const sub = userInfo.id ?? email ?? 'unknown';
+
+        const expiresAt = tokens.expiry_date ? new Date(tokens.expiry_date) : new Date(Date.now() + 3600 * 1000);
+
+        const saved = await upsertCalendarAccount({
+            phone,
+            providerAccountId: sub,
+            email,
+            accessToken,
+            refreshToken,
+            expiresAt,
+        });
+
+        await notifyN8nCalendarConnected({
+            phone,
+            calendarAccountId: saved.id,
+            email: saved.email,
+            calendarId: saved.calendarId,
+        });
+
+        const waReturn = buildWhatsAppReturnLink();
+
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        return res.send(
+            renderSuccessPage({
+                title: 'Google Calendar conectado! 🐝',
+                subtitle: 'Você já pode voltar para o WhatsApp e usar a integração.',
+                details: `Número: ${formatPhoneBR(phone)}${saved.email ? ` • Conta: ${saved.email}` : ''}`,
+                returnLink: waReturn,
+                returnLabel: 'Voltar para o WhatsApp',
+            }),
+        );
+    } catch (err) {
+        console.error('Erro em /calendar/callback', err);
+
+        const msg = err instanceof Error ? err.message : 'unknown_error';
+        const known: Record<string, string> = {
+            state_invalid_format: 'O link de conexão parece estar incompleto.',
+            state_invalid_signature: 'O link de conexão parece ter sido adulterado.',
+            state_expired: 'O link expirou. Gere um novo link no WhatsApp e tente novamente.',
+        };
+
+        res.status(500).setHeader('Content-Type', 'text/html; charset=utf-8');
+        return res.send(renderErrorPage('Erro ao conectar', known[msg] || 'Tente novamente em alguns instantes.'));
+    }
+});
