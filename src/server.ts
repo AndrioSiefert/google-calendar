@@ -27,7 +27,7 @@ app.use(calendarLinkRouter);
 // Endpoints Google Calendar (create/update/delete)
 app.use(googleRemindersRouter);
 
-// Endpoints Google Calendar (list/visualização)
+// Endpoints Google Calendar (list/patch/delete eventos externos)
 app.use(googleEventsRouter);
 
 app.listen(PORT, () => {

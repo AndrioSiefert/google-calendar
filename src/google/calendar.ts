@@ -155,12 +155,69 @@ export async function deleteEvent(params: {
     );
 }
 
+export type GoogleCalendarEventGet = {
+    id: string | null;
+    summary: string | null;
+    description: string | null;
+    recurringEventId: string | null;
+    recurrence: string[] | null;
+    start: {
+        dateTime: string | null;
+        date: string | null;
+        timeZone: string | null;
+    };
+    end: {
+        dateTime: string | null;
+        date: string | null;
+        timeZone: string | null;
+    };
+};
+
+export async function getEvent(params: {
+    calendar: ReturnType<typeof google.calendar>;
+    calendarId: string;
+    eventId: string;
+}) {
+    const resp = await googleRequestWithRetry(() =>
+        params.calendar.events.get({
+            calendarId: params.calendarId,
+            eventId: params.eventId,
+        }),
+    );
+
+    const ev = resp.data;
+    const start = ev.start ?? {};
+    const end = ev.end ?? {};
+
+    const mapped: GoogleCalendarEventGet = {
+        id: (ev.id as string) ?? null,
+        summary: (ev.summary as string) ?? null,
+        description: (ev.description as string) ?? null,
+        recurringEventId: (ev.recurringEventId as string) ?? null,
+        recurrence: (ev.recurrence as string[]) ?? null,
+        start: {
+            dateTime: (start.dateTime as string) ?? null,
+            date: (start.date as string) ?? null,
+            timeZone: (start.timeZone as string) ?? null,
+        },
+        end: {
+            dateTime: (end.dateTime as string) ?? null,
+            date: (end.date as string) ?? null,
+            timeZone: (end.timeZone as string) ?? null,
+        },
+    };
+
+    return mapped;
+}
+
 export type GoogleCalendarListedEvent = {
     id: string;
     status: string | null;
     summary: string | null;
     description: string | null;
     htmlLink: string | null;
+    recurringEventId: string | null;
+    recurrence: string[] | null;
     start: {
         dateTime: string | null;
         date: string | null;
@@ -209,6 +266,8 @@ export async function listEvents(params: {
             summary: (ev.summary as string) ?? null,
             description: (ev.description as string) ?? null,
             htmlLink: (ev.htmlLink as string) ?? null,
+            recurringEventId: (ev.recurringEventId as string) ?? null,
+            recurrence: (ev.recurrence as string[]) ?? null,
             start: {
                 dateTime: (start.dateTime as string) ?? null,
                 date: (start.date as string) ?? null,
