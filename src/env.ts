@@ -31,3 +31,5 @@ export function assertRequiredEnv() {
         process.exit(1);
     }
 }
+
+export const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || ''; 

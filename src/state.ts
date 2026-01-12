@@ -7,8 +7,9 @@ function signState(b64: string): string {
     return Buffer.from(h.digest()).toString('base64url');
 }
 
-export function createState(phone: string): string {
+export function createState(phone: string, extra?: { linkCode?: string }): string {
     const payload = {
+        linkCode: extra?.linkCode || null,
         phone,
         nonce: crypto.randomBytes(8).toString('hex'),
         iat: Date.now(),
@@ -19,7 +20,7 @@ export function createState(phone: string): string {
     return `${b64}.${sig}`;
 }
 
-export function decodeState(state: string): { phone: string; nonce: string } {
+export function decodeState(state: string): { phone: string; nonce: string; linkCode?: string | null } {
     const parts = String(state).split('.');
     if (parts.length !== 2) {
         throw new Error('state_invalid_format');
@@ -38,7 +39,13 @@ export function decodeState(state: string): { phone: string; nonce: string } {
     }
 
     const json = Buffer.from(b64, 'base64url').toString('utf8');
-    const payload = JSON.parse(json) as { phone: string; nonce: string; iat?: number; ttl_ms?: number };
+    const payload = JSON.parse(json) as {
+        phone: string;
+        nonce: string;
+        linkCode?: string | null;
+        iat?: number;
+        ttl_ms?: number;
+    };
 
     const iat = payload.iat ?? 0;
     const ttl = payload.ttl_ms ?? 0;
@@ -46,5 +53,5 @@ export function decodeState(state: string): { phone: string; nonce: string } {
         throw new Error('state_expired');
     }
 
-    return { phone: payload.phone, nonce: payload.nonce };
+    return { phone: payload.phone, nonce: payload.nonce, linkCode: payload.linkCode ?? null };
 }
