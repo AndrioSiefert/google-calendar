@@ -154,3 +154,76 @@ export async function deleteEvent(params: {
         }),
     );
 }
+
+export type GoogleCalendarListedEvent = {
+    id: string;
+    status: string | null;
+    summary: string | null;
+    description: string | null;
+    htmlLink: string | null;
+    start: {
+        dateTime: string | null;
+        date: string | null;
+        timeZone: string | null;
+    };
+    end: {
+        dateTime: string | null;
+        date: string | null;
+        timeZone: string | null;
+    };
+};
+
+export async function listEvents(params: {
+    calendar: ReturnType<typeof google.calendar>;
+    calendarId: string;
+    timeMin: string;
+    timeMax: string;
+    timeZone?: string;
+    q?: string;
+    maxResults?: number;
+    includeCancelled?: boolean;
+}) {
+    const maxResults = Math.min(Math.max(1, params.maxResults ?? 100), 2500);
+
+    const resp = await googleRequestWithRetry(() =>
+        params.calendar.events.list({
+            calendarId: params.calendarId,
+            timeMin: params.timeMin,
+            timeMax: params.timeMax,
+            timeZone: params.timeZone,
+            q: params.q,
+            maxResults,
+            singleEvents: true,
+            orderBy: 'startTime',
+            showDeleted: !!params.includeCancelled,
+        }),
+    );
+
+    const items = (resp.data.items ?? []).map((ev): GoogleCalendarListedEvent => {
+        const start = ev.start ?? {};
+        const end = ev.end ?? {};
+
+        return {
+            id: String(ev.id ?? ''),
+            status: (ev.status as string) ?? null,
+            summary: (ev.summary as string) ?? null,
+            description: (ev.description as string) ?? null,
+            htmlLink: (ev.htmlLink as string) ?? null,
+            start: {
+                dateTime: (start.dateTime as string) ?? null,
+                date: (start.date as string) ?? null,
+                timeZone: (start.timeZone as string) ?? null,
+            },
+            end: {
+                dateTime: (end.dateTime as string) ?? null,
+                date: (end.date as string) ?? null,
+                timeZone: (end.timeZone as string) ?? null,
+            },
+        };
+    });
+
+    return {
+        items,
+        nextPageToken: resp.data.nextPageToken ?? null,
+    };
+}
