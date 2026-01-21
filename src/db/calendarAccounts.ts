@@ -8,22 +8,22 @@ export async function updateCalendarAccountTokens(params: {
 }): Promise<void> {
   const accessToken = params.accessToken ?? null;
   const refreshToken = params.refreshToken ?? null;
-  const expiresAtIso = params.expiresAt ? params.expiresAt.toISOString() : null;
+  const expiresAt = params.expiresAt ?? null;
 
   await pool.query(
     `
         update public.calendar_accounts
         set
-          access_token     = coalesce($2, access_token),
+          access_token     = coalesce($2::text, access_token),
           refresh_token    = case
-                              when $3 is not null and $3 <> '' then $3
+                              when $3::text is not null and $3::text <> '' then $3::text
                               else refresh_token
                             end,
-          token_expires_at = coalesce($4, token_expires_at),
+          token_expires_at = coalesce($4::timestamptz, token_expires_at),
           updated_at       = now()
-        where id = $1
+        where id = $1::uuid
       `,
-    [params.id, accessToken, refreshToken, expiresAtIso],
+    [params.id, accessToken, refreshToken, expiresAt],
   );
 }
 
@@ -73,7 +73,7 @@ export async function upsertCalendarAccount(params: {
         params.email,
         params.accessToken,
         params.refreshToken,
-        params.expiresAt.toISOString(),
+        params.expiresAt,
       ],
     );
 
