@@ -1,6 +1,6 @@
+import dns from 'node:dns';
 import express from 'express';
 import cors from 'cors';
-
 import { assertRequiredEnv, PORT } from './env';
 import { pagesRouter } from './routes/pages';
 import { healthRouter } from './routes/health';
@@ -9,6 +9,11 @@ import { googleRemindersRouter } from './routes/googleReminders';
 import { googleEventsRouter } from './routes/googleEvents';
 
 assertRequiredEnv();
+
+
+try {
+    dns.setDefaultResultOrder('ipv4first');
+} catch { }
 
 const app = express();
 app.set('trust proxy', true);

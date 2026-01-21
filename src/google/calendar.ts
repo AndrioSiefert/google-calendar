@@ -33,6 +33,31 @@ export function isGoogleRateLimitError(err: any): boolean {
 }
 
 function isRetryableGoogleError(err: any): boolean {
+    const codeRaw = (err?.code ?? err?.error?.code ?? err?.cause?.code) as unknown;
+    const code = typeof codeRaw === 'string' ? codeRaw : null;
+    if (
+        code &&
+        [
+            'ETIMEDOUT',
+            'ECONNRESET',
+            'EAI_AGAIN',
+            'ENOTFOUND',
+            'ECONNREFUSED',
+            'EPIPE',
+            'UND_ERR_CONNECT_TIMEOUT',
+            'UND_ERR_HEADERS_TIMEOUT',
+            'UND_ERR_BODY_TIMEOUT',
+            'UND_ERR_SOCKET',
+        ].includes(code)
+    ) {
+        return true;
+    }
+
+    const msg = String(err?.message ?? '').toLowerCase();
+    if (msg.includes('timeout') || msg.includes('timed out') || msg.includes('socket hang up')) {
+        return true;
+    }
+
     const status = Number(err?.code || err?.response?.status || 0);
     if (status >= 500) return true;
     if (status === 429) return true;
@@ -71,12 +96,17 @@ async function googleRequestWithRetry<T>(
     throw lastErr;
 }
 
-export function buildCalendarClientFromAccount(account: {
-    calendarId: string;
-    accessToken: string | null;
-    refreshToken: string | null;
-    tokenExpiresAt?: string | Date | null;
-}) {
+export function buildCalendarClientFromAccount(
+    account: {
+        calendarId: string;
+        accessToken: string | null;
+        refreshToken: string | null;
+        tokenExpiresAt?: string | Date | null;
+    },
+    onTokens?: (tokens: { access_token?: string | null; refresh_token?: string | null; expiry_date?: number | null }) =>
+        | void
+        | Promise<void>,
+) {
     if (!account.refreshToken) {
         return null;
     }
@@ -84,6 +114,20 @@ export function buildCalendarClientFromAccount(account: {
     const oauthClient = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI);
 
     const expiryDate = account.tokenExpiresAt ? new Date(account.tokenExpiresAt).getTime() : undefined;
+
+    if (onTokens) {
+        oauthClient.on('tokens', (tokens: any) => {
+            try {
+                void onTokens({
+                    access_token: tokens?.access_token ?? null,
+                    refresh_token: tokens?.refresh_token ?? null,
+                    expiry_date: typeof tokens?.expiry_date === 'number' ? tokens.expiry_date : null,
+                });
+            } catch (e) {
+                console.error('Falha ao processar evento tokens do OAuth2Client:', e);
+            }
+        });
+    }
 
     oauthClient.setCredentials({
         refresh_token: account.refreshToken,

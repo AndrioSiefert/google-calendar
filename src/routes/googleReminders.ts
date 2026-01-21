@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { findActiveCalendarAccountForPhone } from '../db/calendarAccounts';
+import { findActiveCalendarAccountForPhone, updateCalendarAccountTokens } from '../db/calendarAccounts';
 import {
     deleteGoogleReminderLocal,
     findGoogleReminderByReminderId,
@@ -48,7 +48,15 @@ googleRemindersRouter.post('/google-reminders/create', async (req, res) => {
                 };
             }
 
-            const calendarClient = buildCalendarClientFromAccount(account);
+            const calendarClient = buildCalendarClientFromAccount(account, async (t) => {
+                const expiresAt = t.expiry_date ? new Date(t.expiry_date) : null;
+                await updateCalendarAccountTokens({
+                    id: account.id,
+                    accessToken: t.access_token ?? null,
+                    refreshToken: t.refresh_token ?? null,
+                    expiresAt,
+                });
+            });
             if (!calendarClient) {
                 return { ok: false, error: 'invalid_tokens' };
             }
@@ -115,7 +123,7 @@ googleRemindersRouter.post('/google-reminders/update', async (req, res) => {
     try {
         const { phone, id, reminder_id, content, due_at, tz } = req.body as {
             phone?: string;
-            id?: string; 
+            id?: string;
             reminder_id?: string;
             content?: string;
             due_at?: string;
@@ -151,12 +159,23 @@ googleRemindersRouter.post('/google-reminders/update', async (req, res) => {
             let updatedOnGoogle = false;
 
             if (googleEventId && row.refresh_token) {
-                const calendarClient = buildCalendarClientFromAccount({
-                    calendarId,
-                    accessToken: row.access_token,
-                    refreshToken: row.refresh_token,
-                    tokenExpiresAt: row.token_expires_at ?? null,
-                });
+                const calendarClient = buildCalendarClientFromAccount(
+                    {
+                        calendarId,
+                        accessToken: row.access_token,
+                        refreshToken: row.refresh_token,
+                        tokenExpiresAt: row.token_expires_at ?? null,
+                    },
+                    async (t) => {
+                        const expiresAt = t.expiry_date ? new Date(t.expiry_date) : null;
+                        await updateCalendarAccountTokens({
+                            id: row.calendar_account_id,
+                            accessToken: t.access_token ?? null,
+                            refreshToken: t.refresh_token ?? null,
+                            expiresAt,
+                        });
+                    },
+                );
 
                 if (calendarClient) {
                     const { calendar } = calendarClient;
@@ -232,12 +251,23 @@ googleRemindersRouter.post('/google-reminders/delete', async (req, res) => {
             let deletedOnGoogle = false;
 
             if (googleEventId && row.refresh_token) {
-                const calendarClient = buildCalendarClientFromAccount({
-                    calendarId,
-                    accessToken: row.access_token,
-                    refreshToken: row.refresh_token,
-                    tokenExpiresAt: row.token_expires_at ?? null,
-                });
+                const calendarClient = buildCalendarClientFromAccount(
+                    {
+                        calendarId,
+                        accessToken: row.access_token,
+                        refreshToken: row.refresh_token,
+                        tokenExpiresAt: row.token_expires_at ?? null,
+                    },
+                    async (t) => {
+                        const expiresAt = t.expiry_date ? new Date(t.expiry_date) : null;
+                        await updateCalendarAccountTokens({
+                            id: row.calendar_account_id,
+                            accessToken: t.access_token ?? null,
+                            refreshToken: t.refresh_token ?? null,
+                            expiresAt,
+                        });
+                    },
+                );
 
                 if (calendarClient) {
                     const { calendar } = calendarClient;

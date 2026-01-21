@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { findActiveCalendarAccountForPhone } from '../db/calendarAccounts';
+import { findActiveCalendarAccountForPhone, updateCalendarAccountTokens } from '../db/calendarAccounts';
 import {
     buildCalendarClientFromAccount,
     getEvent,
@@ -17,11 +17,8 @@ function isBiaManagedEvent(ev: { summary?: string | null; description?: string |
     const s = (ev?.summary ?? '').toString().toLowerCase();
     const d = (ev?.description ?? '').toString().toLowerCase();
 
-    // Marcadores que você já usa ao criar lembretes no Google
     if (d.includes('lembrete criado pela bia')) return true;
     if (d.includes('bia 🐝')) return true;
-
-    // Segurança extra (caso você padronize no título no futuro)
     if (s.includes('bia 🐝')) return true;
 
     return false;
@@ -48,7 +45,15 @@ googleEventsRouter.post('/google-events/list', async (req, res) => {
             return res.json({ ok: false, error: 'no_calendar_account' });
         }
 
-        const calendarClient = buildCalendarClientFromAccount(account);
+        const calendarClient = buildCalendarClientFromAccount(account, async (t) => {
+            const expiresAt = t.expiry_date ? new Date(t.expiry_date) : null;
+            await updateCalendarAccountTokens({
+                id: account.id,
+                accessToken: t.access_token ?? null,
+                refreshToken: t.refresh_token ?? null,
+                expiresAt,
+            });
+        });
         if (!calendarClient) {
             return res.json({ ok: false, error: 'invalid_tokens' });
         }
@@ -120,7 +125,15 @@ googleEventsRouter.post('/google-events/patch', async (req, res) => {
             return res.json({ ok: false, error: 'no_calendar_account' });
         }
 
-        const calendarClient = buildCalendarClientFromAccount(account);
+        const calendarClient = buildCalendarClientFromAccount(account, async (t) => {
+            const expiresAt = t.expiry_date ? new Date(t.expiry_date) : null;
+            await updateCalendarAccountTokens({
+                id: account.id,
+                accessToken: t.access_token ?? null,
+                refreshToken: t.refresh_token ?? null,
+                expiresAt,
+            });
+        });
         if (!calendarClient) {
             return res.json({ ok: false, error: 'invalid_tokens' });
         }
@@ -128,9 +141,6 @@ googleEventsRouter.post('/google-events/patch', async (req, res) => {
         const queueKey = `calendar:${account.id}`;
 
         const result = await enqueueThrottledRedis(queueKey, 800, async () => {
-            // Sempre buscamos o evento para:
-            // - bloquear eventos criados pela BIA (evitar desync Supabase)
-            // - descobrir recurringEventId caso scope=series
             let ev;
             try {
                 ev = await getEvent({
@@ -179,7 +189,6 @@ googleEventsRouter.post('/google-events/patch', async (req, res) => {
             };
         });
 
-        // Se bloqueou, devolvemos 403 para ficar claro
         if ((result as any)?.ok === false && (result as any)?.error === 'bia_event_blocked') {
             return res.status(403).json(result);
         }
@@ -211,7 +220,15 @@ googleEventsRouter.post('/google-events/delete', async (req, res) => {
             return res.json({ ok: false, error: 'no_calendar_account' });
         }
 
-        const calendarClient = buildCalendarClientFromAccount(account);
+        const calendarClient = buildCalendarClientFromAccount(account, async (t) => {
+            const expiresAt = t.expiry_date ? new Date(t.expiry_date) : null;
+            await updateCalendarAccountTokens({
+                id: account.id,
+                accessToken: t.access_token ?? null,
+                refreshToken: t.refresh_token ?? null,
+                expiresAt,
+            });
+        });
         if (!calendarClient) {
             return res.json({ ok: false, error: 'invalid_tokens' });
         }
